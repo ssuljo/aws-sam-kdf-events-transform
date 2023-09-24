@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+version: 0.1
+Description: >
+  sam-kdf-events-transform
+
+  Sample SAM Template for sam-kdf-events-transform
+
+Parameters:
+  KinesisStreamName:
+    Type: String
+    Default: sam-cart-events-kds
+    Description: "The Kinesis Data Stream name"
+
+  FirehoseBufferingInterval:
+    Type: Number
+    Default: 60
+    MinValue: 60
+    MaxValue: 900
+    Description: "How long Firehose will wait before writing a new batch into S3"
+
+  FirehoseBufferingSize:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 128
+    Description: "Maximum batch size in MB"
+
+  FirehoseCompressionFormat:
+    Type: String
+    Default: UNCOMPRESSED
+    AllowedValues: [ UNCOMPRESSED, GZIP, Snappy ]
+    Description: "Compression format used by Kinesis Firehose"
+
+  DeliveryBucketName:
+    Type: String
+    Default: 'cart-events-firehose-bucket'
+    Description: "The S3 bucket name for Kinesis Firehose"
+
+  FirehoseS3Prefix:
+    Type: String
+    Default: firehose/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/
+    Description: "The S3 Key prefix for Kinesis Firehose."
+
+  RawDataS3Prefix:
+    Type: String
+    Default: raw-data/
+    Description: "The S3 Key prefix for raw data."
+
+  ErrorDataS3Prefix:
+    Type: String
+    Default: fherroroutput/!{firehose:random-string}/result=!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/
+    Description: "The S3 Key prefix for raw data errors."
+
+Resources:
+
+  ##########################################
+  # Kinesis Data Stream                    #
+  ##########################################
+
+  KinesisEventsStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Ref KinesisStreamName
+      ShardCount: 2
+
+  ##########################################
+  # S3 Delivery Bucket                     #
+  ##########################################
+  DeliveryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DeliveryBucketName
+
+  ##########################################
+  # Lambda function                        #
+  ##########################################
+  ProcessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: events_transform/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Timeout: 90
+      MemorySize: 256
+
+  ##########################################
+  # Kinesis Data Firehose configuration    #
+  ##########################################
+  DeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Ref KinesisStreamName
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt KinesisEventsStream.Arn
+        RoleARN: !GetAtt DeliveryStreamRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt DeliveryBucket.Arn
+        Prefix: !Ref FirehoseS3Prefix
+        ErrorOutputPrefix: !Ref ErrorDataS3Prefix
+        CompressionFormat: !Ref FirehoseCompressionFormat
+        RoleARN: !GetAtt DeliveryStreamRole.Arn
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt ProcessFunction.Arn
+        BufferingHints:
+          IntervalInSeconds: !Ref FirehoseBufferingInterval
+          SizeInMBs: !Ref FirehoseBufferingSize
+        S3BackupMode: Enabled
+        S3BackupConfiguration:
+          BucketARN: !GetAtt DeliveryBucket.Arn
+          Prefix: !Ref RawDataS3Prefix
+          CompressionFormat: !Ref FirehoseCompressionFormat
+          RoleARN: !GetAtt DeliveryStreamRole.Arn
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 1
+
+  ##########################################
+  # IAM roles and policies                 #
+  ##########################################
+
+  # Access role for Firehose
+  DeliveryStreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "firehose.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: S3WritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Action:
+                - s3:PutObject
+              Effect: Allow
+              Resource:
+                - !GetAtt DeliveryBucket.Arn
+                - !Sub
+                  - ${Arn}/*
+                  - { Arn: !GetAtt DeliveryBucket.Arn }
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Action:
+                - lambda:InvokeFunction
+              Effect: Allow
+              Resource:
+                - !GetAtt ProcessFunction.Arn
+        - PolicyName: FirehoseDeliveryStreamPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Action:
+                - 'kinesis:DescribeStream'
+                - 'kinesis:GetShardIterator'
+                - 'kinesis:GetRecords'
+                - 'kinesis:ListShards'
+              Effect:
+                Allow
+              Resource:
+                !GetAtt KinesisEventsStream.Arn
+
+Outputs:
+  BucketName:
+    Description: The bucket where data will be stored
+    Value: !Ref DeliveryBucket
+  FunctionName:
+    Description: The Lambda Function that will process Firehose records
+    Value: !Ref ProcessFunction
+  DataStreamName:
+    Description: The Kinesis Data Stream that will be source of data
+    Value: !Ref KinesisEventsStream
