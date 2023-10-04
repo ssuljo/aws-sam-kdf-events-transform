@@ -11,6 +11,11 @@ Parameters:
     Default: sam-cart-events-kds
     Description: "The Kinesis Data Stream name"
 
+  KinesisShards:
+    Type: Number
+    Default: 2
+    Description: "The number of shards for Kinesis Data Stream"
+
   FirehoseBufferingInterval:
     Type: Number
     Default: 60
@@ -61,7 +66,7 @@ Resources:
     Type: AWS::Kinesis::Stream
     Properties:
       Name: !Ref KinesisStreamName
-      ShardCount: 2
+      ShardCount: !Ref KinesisShards
 
   ##########################################
   # S3 Delivery Bucket                     #
